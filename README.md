@@ -3,6 +3,8 @@
 
 Elias Kristmann, Michael Wimmer, Markus Schütz
 
+<img src="docs/cover.jpg">
+
 This project demonstrates that variable-rate compressed textures are viable on modern GPUs, achieving over 1500 FPS when rendering the Sponza scene with JPEG textures on an RTX 4090. The results of this work are a first step towards adopting more advanced formats such as AVIF and JPEG XL, which offer improved compression efficiency and could ultimately enable much larger texture datasets to fit within GPU memory.
 
 The implementation uses OpenGL to first create a G-Buffer, and CUDA to decode the required JPEG blocks (aka <b>Minimum Coded Units - MCUs; 16 x 16 pixels</b>). The rendering pipeline comprises following passes:
