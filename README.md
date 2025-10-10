@@ -1,7 +1,7 @@
 
 # Variable-Rate Texture Compression: Real-Time Rendering with JPEG
 
-Elias Kristmann, Michael Wimmer, Markus Schütz
+[Elias Kristmann](https://www.cg.tuwien.ac.at/staff/EliasKristmann), [Michael Wimmer](https://www.cg.tuwien.ac.at/staff/MichaelWimmer), [Markus Schütz](https://www.cg.tuwien.ac.at/staff/MarkusSch%C3%BCtz)
 
 <img src="docs/cover.jpg">
 
