@@ -78,7 +78,13 @@ TODO
 
 ## Modifying
 
+* To load your own glb model with JPEG textures, modify loadGraffiti() in main.cpp.
+* To view the Sponza scene, replace loadGraffiti() with loadSponza().
+* To create a glb with JPEG textures, load your glb in [https://www.gltfeditor.com/](https://www.gltfeditor.com/), then save with Textures = JPEG and the desired level of quality.
+
+
 The most relevant files for modification are as follows:
+
 <table>
 	<tr>
 		<td>main.cpp</td>
