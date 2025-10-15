@@ -1,10 +1,9 @@
 
-# Variable-Rate Texture Compression: Real-Time Rendering with JPEG
+# Real-Time Rendering with JPEG-Compressed Textures
 
 
 
-Paper: [[Arxiv]](https://arxiv.org/abs/2510.08166),
-[Elias Kristmann](https://www.cg.tuwien.ac.at/staff/EliasKristmann), [Michael Wimmer](https://www.cg.tuwien.ac.at/staff/MichaelWimmer), [Markus Schütz](https://www.cg.tuwien.ac.at/staff/MarkusSch%C3%BCtz)
+Paper: ["Variable-Rate Texture Compression: Real-Time Rendering with JPEG", Elias Kristmann, Michael Wimmer, Markus Schütz](https://arxiv.org/abs/2510.08166)
 
 <img src="docs/cover.jpg">
 
