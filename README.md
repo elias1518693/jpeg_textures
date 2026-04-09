@@ -105,13 +105,13 @@ The most relevant files for modification are as follows:
 ## Citing
 
 ```
-@misc{JpegTextures,
+@article{JpegTextures,
       title={Variable-Rate Texture Compression: Real-Time Rendering with JPEG}, 
-      author={Elias Kristmann and Markus Schütz and Michael Wimmer},
-      year={2025},
-      eprint={2510.08166},
-      archivePrefix={arXiv},
-      primaryClass={cs.GR},
-      url={https://arxiv.org/abs/2510.08166}, 
+      author={Elias Kristmann and Michael Wimmer and Markus Schütz},
+      journal={Computer Graphics Forum},
+      volume={45},
+      number={2},
+      year={2026},
+      eprint={2510.08166}
 }
 ```
