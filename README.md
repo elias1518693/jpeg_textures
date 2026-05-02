@@ -3,7 +3,7 @@
 
 
 
-Paper: ["Variable-Rate Texture Compression: Real-Time Rendering with JPEG", Elias Kristmann, Michael Wimmer, Markus Schütz](https://arxiv.org/abs/2510.08166)
+Paper: ["Variable-Rate Texture Compression: Real-Time Rendering with JPEG", Elias Kristmann, Michael Wimmer, Markus Schütz](https://diglib.eg.org/items/48ef1f17-5045-4473-8b8d-9bf3064fe425)
 
 <img src="docs/cover.jpg">
 
@@ -105,13 +105,18 @@ The most relevant files for modification are as follows:
 ## Citing
 
 ```
-@article{JpegTextures,
-      title={Variable-Rate Texture Compression: Real-Time Rendering with JPEG}, 
-      author={Elias Kristmann and Michael Wimmer and Markus Schütz},
-      journal={Computer Graphics Forum},
-      volume={45},
-      number={2},
-      year={2026},
-      eprint={2510.08166}
+
+@article{10.1111:cgf.70338,
+journal = {Computer Graphics Forum},
+title = {{Variable-Rate Texture Compression: Real-Time Rendering with JPEG}},
+author = {Kristmann, Elias and Wimmer, Michael and Schütz, Markus},
+year = {2026},
+publisher = {The Eurographics Association and John Wiley & Sons Ltd.},
+ISSN = {1467-8659},
+DOI = {10.1111/cgf.70338}
 }
+        
+
 ```
+
+
