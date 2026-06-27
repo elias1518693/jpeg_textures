@@ -11,8 +11,7 @@ using namespace std;
 struct HuffmanTable {
 	int num_codes_per_bit_length[16];
 	int huffman_values[256];
-	int huffman_keys[256];
-	int codelengths[256];
+	uint32_t packed[256];
 };
 
 struct QuantizationTable {
@@ -73,6 +72,7 @@ void initJpegPipeline(){
 		for (const auto& class_entry : indexer.huffman_tables_components) {
 			for (const auto& table_entry : class_entry.second) {
 				HuffmanTable huff_table = {};
+				int temp_keys[256] = {};
 				int value_index = 0;
 				for (const auto& code_value : table_entry.second) {
 					const string& code = code_value.first;
@@ -80,7 +80,7 @@ void initJpegPipeline(){
 
 					int code_len = code.size();
 					huff_table.num_codes_per_bit_length[code_len - 1] += 1;
-					huff_table.huffman_keys[value_index] = std::stoi(code, nullptr, 2);
+					temp_keys[value_index] = std::stoi(code, nullptr, 2);
 					huff_table.huffman_values[value_index] = value;
 					value_index++;
 				}
@@ -94,7 +94,7 @@ void initJpegPipeline(){
 					int codeLength = i + 1;
 					int numCodes = huff_table.num_codes_per_bit_length[i];
 					for(int j = 0; j < numCodes; j++){
-						huff_table.codelengths[codeIndex] = codeLength;
+						huff_table.packed[codeIndex] = (uint32_t(codeLength) << 16) | uint32_t(temp_keys[codeIndex]);
 						codeIndex++;
 					}
 				}

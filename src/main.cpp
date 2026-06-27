@@ -37,8 +37,9 @@ void initCuda() {
 	cuInit(0);
 
 	CUcontext context;
+	CUctxCreateParams creation_params = {};
 	cuDeviceGet(&CURuntime::device, 0);
-	cuCtxCreate(&context, 0, CURuntime::device);
+	cuCtxCreate(&context, &creation_params, 0, CURuntime::device);
 }
 
 bool resize_jpeg_buffer_turbo(const std::vector<uint8_t>& jpeg_input,

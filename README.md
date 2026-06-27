@@ -62,7 +62,7 @@ Take Aways:
 ### Windows
 
 Dependencies: 
-* CUDA 12.4
+* CUDA 13.2
 * Visual Studio 2022 (version 17.10.3)
 * A GPU with compute capability 8.6
 

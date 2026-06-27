@@ -8,7 +8,7 @@ namespace std {
 };
 // =======================
 
-#include <curand_kernel.h>
+// #include <curand_kernel.h>
 #include <cooperative_groups.h>
 
 #include "./libs/glm/glm/glm.hpp"
@@ -37,8 +37,8 @@ struct Decoded {
 struct HuffmanTable {
 	int num_codes_per_bit_length[16];
 	int huffman_values[256];
-	int huffman_keys[256];
-	int codelengths[256];
+	// packed[i] = (codelength << 16) | huffman_key — one load covers both per ballot lane
+	uint32_t packed[256];
 };
 
 struct QuantizationTable {
@@ -292,46 +292,48 @@ int decodeHuffman(BitReaderGPU& bit_reader, const HuffmanTable& huffman_table) {
 		int code_count = huffman_table.num_codes_per_bit_length[bit_length - 1];
 #pragma unroll
 		for (int j = 0; j < code_count; j++) {
-			if (huffman_table.huffman_keys[offset + j] == code) {
+			if ((int)(huffman_table.packed[offset + j] & 0xFFFF) == code) {
 				return huffman_table.huffman_values[offset + j];
 			}
 		}
-		offset += huffman_table.num_codes_per_bit_length[bit_length - 1];
+		offset += code_count;
 	}
 	return -1;
 }
 
 int decodeHuffman_warpwide(BitReaderGPU& bit_reader, const HuffmanTable& huffman_table) {
 
-	auto grid = cg::this_grid();
 	auto block = cg::this_thread_block();
 	auto warp = cg::tiled_partition<32>(block);
-	auto index = grid.thread_rank();
 
 	uint32_t code_peek = bit_reader.peek16Bit2();
 
-	// decode up to 128 huffman codes. (4 iterations, 32 codes per iteration)
-	// changed to 192 (6 iterations, 32 codes)
-	#pragma unroll
+	// Each thread loads one packed entry: high 16 bits = code length, low 16 bits = key.
+	// One cache line (128 bytes) covers all 32 lanes — half the memory traffic vs two
+	// separate codelengths[]+huffman_keys[] loads. Break early when all lengths are 0.
 	for(int i = 0; i < 6; i++){
 		int codeIndex = i * 32 + warp.thread_rank();
-		uint32_t bit_length = huffman_table.codelengths[codeIndex];
+		uint32_t p = __ldg(&huffman_table.packed[codeIndex]);
+		uint32_t bit_length = p >> 16;
+		uint32_t key = p & 0xFFFF;
 		uint32_t code = code_peek >> (16 - bit_length);
-		bool isValidCode = huffman_table.huffman_keys[codeIndex] == code;
+		bool isValidCode = (bit_length > 0) && (key == code);
 
 		uint32_t mask = warp.ballot(isValidCode);
 
 		if(mask > 0){
 			int winningLane = __ffs(mask) - 1;
 
-			// the winning lane broadcasts the huffman value and the bit length to all other threads
 			bit_length = warp.shfl(bit_length, winningLane);
-			uint32_t huffmanValue = warp.shfl(huffman_table.huffman_values[codeIndex], winningLane);
+			uint32_t huffmanValue = warp.shfl(__ldg(&huffman_table.huffman_values[codeIndex]), winningLane);
 
 			bit_reader.advance(bit_length);
 
 			return huffmanValue;
 		}
+
+		// No valid codes remain in this chunk — stop scanning
+		if(warp.ballot(bit_length > 0) == 0) break;
 	}
 
 	return -1;
@@ -527,129 +529,155 @@ void kernel_mark(
 extern "C" __global__
 void kernel_decode_420(
 	uint32_t* toDecode,
+	uint32_t numToDecode,
 	uint32_t* decoded,
 	TextureData* texturesData,
 	HashMap decodedMcuMap,
 	uint32_t* TBSlots,
 	uint32_t firstAvailableTBSlotsIndex
 ) {
-	auto grid = cg::this_grid();
+	auto grid  = cg::this_grid();
 	auto block = cg::this_thread_block();
-	auto warp = cg::tiled_partition<32>(block);
-	int thread = block.thread_rank();
+	auto warp  = cg::tiled_partition<32>(block);
 
-	uint32_t textureInfo = toDecode[grid.block_rank()];
-	uint32_t texture_id = ((textureInfo >> 0) & 0xffff);
-	uint32_t mcu = (textureInfo >> 16) & 0xffff;
+	// 64 threads per block, 2 MCUs per block.
+	// Warp 0 (threads  0-31) → MCU 0
+	// Warp 1 (threads 32-63) → MCU 1
+	// Both warps decode their MCU's Huffman stream in parallel.
+	int mcu_in_block = warp.meta_group_rank();  // 0 or 1
+	int thread       = warp.thread_rank();       // 0..31
 
-	block.sync();
+	uint32_t global_mcu_index = grid.block_rank() * 2 + mcu_in_block;
+	bool is_valid = global_mcu_index < numToDecode;
 
-	__shared__ float sh_coefficients[384];
-	__shared__ float sh_dezigzagged[510];
-	__shared__ uint8_t sh_data[510];
+	__shared__ float   sh_coefficients[384 * 2];
+	__shared__ float   sh_dezigzagged [384 * 2];
+	__shared__ uint8_t sh_data        [512 * 2];
+	__shared__ int     sh_tbslot      [2];
+
+	int coeff_off  = mcu_in_block * 384;
+	int dezzig_off = mcu_in_block * 384;
+	int data_off   = mcu_in_block * 512;
+
+	uint32_t textureInfo = is_valid ? toDecode[global_mcu_index] : 0;
+	uint32_t texture_id  = (textureInfo >>  0) & 0xffff;
+	uint32_t mcu         = (textureInfo >> 16) & 0xffff;
 
 	const TextureData& textureData = texturesData[texture_id];
 
-	int datastart = calculate_datastart(mcu, textureData.mcuPositions);
+	int datastart    = is_valid ? calculate_datastart(mcu, textureData.mcuPositions) : 0;
 	int datastartbit = datastart % 8;
 
-	// Load compressed data into shared memory
-	for (int i = 0; i < 6; i++) {
-		sh_data[block.thread_rank() + 64 * i] = textureData.data[datastart / 8 + block.thread_rank() + 64 * i];
-		sh_coefficients[block.thread_rank() + 64 * i] = 0;
+	for (int i = 0; i < 12; i++) {
+		sh_data[data_off + thread + 32 * i] = is_valid
+			? __ldg(&textureData.data[datastart / 8 + thread + 32 * i])
+			: 0;
+		sh_coefficients[coeff_off + thread + 32 * i] = 0;
 	}
 
 	block.sync();
 
-	BitReaderGPU bit_reader(&sh_data[0], datastartbit);
+	BitReaderGPU bit_reader(&sh_data[data_off], datastartbit);
 
-	// Decode DC's with first warp
-	if (warp.meta_group_rank() == 0)
-	{
+	// Each warp independently decodes its MCU's DC coefficients
+	if (is_valid) {
 		int previousDC = (bit_reader.read_bits(12) & 0x0fff) - 2048;
-		sh_coefficients[0] = previousDC;
+		sh_coefficients[coeff_off + 0] = previousDC;
 		for (int i = 1; i < 4; i++) {
-
-			int huff_index = (i <= 3) ? 0 : (i - 3);
-			const HuffmanTable& huffmanTable = textureData.huffmanTables[huff_index];
+			const HuffmanTable& huffmanTable = textureData.huffmanTables[0];
 			int dc_value = decodeHuffman_warpwide(bit_reader, huffmanTable);
 			if (dc_value > 0) {
 				int dc_difference = bit_reader.read_bits(dc_value);
 				dc_value = DecodeNumber(dc_value, dc_difference);
 			}
-
-			sh_coefficients[i * 64] = dc_value + previousDC;
+			sh_coefficients[coeff_off + i * 64] = dc_value + previousDC;
 			previousDC = dc_value + previousDC;
 		}
-		sh_coefficients[64 * 4] = (bit_reader.read_bits(12) & 0x0fff) - 2048;
-		sh_coefficients[64 * 5] = (bit_reader.read_bits(12) & 0x0fff) - 2048;
+		sh_coefficients[coeff_off + 64 * 4] = (bit_reader.read_bits(12) & 0x0fff) - 2048;
+		sh_coefficients[coeff_off + 64 * 5] = (bit_reader.read_bits(12) & 0x0fff) - 2048;
 	}
 
-	block.sync();
-
-	// Decode AC's with first warp
-	if (warp.meta_group_rank() == 0)
-	{
+	// Each warp independently decodes its MCU's AC coefficients
+	if (is_valid) {
 		for (int i = 0; i < 6; i++) {
 			int huff_index = (i <= 3) ? 0 : (i - 3);
-
 			const HuffmanTable& huffmanTable = textureData.huffmanTables[3 + huff_index];
-			int previousDC = 0;
-
-			decodeCoefficients_warpwide(bit_reader, huffmanTable, &sh_coefficients[i * 64]);
+			decodeCoefficients_warpwide(bit_reader, huffmanTable, &sh_coefficients[coeff_off + i * 64]);
 		}
 	}
 
 	block.sync();
 
-	QuantizationTable* quanttable1 = &textureData.quanttables[0];
-	QuantizationTable* quanttable2 = &textureData.quanttables[1];
-	for (int i = 0; i < 4; i++)
-		sh_dezigzagged[dezigzag_order[thread] + i * 64] = sh_coefficients[threadIdx.x + 64 * i] * quanttable1->values[thread];
-	for (int i = 0; i < 2; i++)
-		sh_dezigzagged[dezigzag_order[thread] + i * 64 + 256] = sh_coefficients[threadIdx.x + 256 + 64 * i] * quanttable2->values[thread];
+	float q1_lo = __ldg(&textureData.quanttables[0].values[thread]);
+	float q1_hi = __ldg(&textureData.quanttables[0].values[thread + 32]);
+	float q2_lo = __ldg(&textureData.quanttables[1].values[thread]);
+	float q2_hi = __ldg(&textureData.quanttables[1].values[thread + 32]);
+
+	for (int i = 0; i < 4; i++) {
+		sh_dezigzagged[dezzig_off + dezigzag_order[thread]      + i * 64] = sh_coefficients[coeff_off + thread      + 64 * i] * q1_lo;
+		sh_dezigzagged[dezzig_off + dezigzag_order[thread + 32] + i * 64] = sh_coefficients[coeff_off + thread + 32 + 64 * i] * q1_hi;
+	}
+	for (int i = 0; i < 2; i++) {
+		sh_dezigzagged[dezzig_off + dezigzag_order[thread]      + i * 64 + 256] = sh_coefficients[coeff_off + thread      + 256 + 64 * i] * q2_lo;
+		sh_dezigzagged[dezzig_off + dezigzag_order[thread + 32] + i * 64 + 256] = sh_coefficients[coeff_off + thread + 32 + 256 + 64 * i] * q2_hi;
+	}
 
 	block.sync();
 
-	idct8x8_optimized(&sh_dezigzagged[(thread / 8) * 64], thread % 8);
+	for (int pass = 0; pass < 2; pass++) {
+		int t = thread + pass * 32;
+		if (t / 8 < 6)
+			CUDAsubroutineInplaceIDCTvector(&sh_dezigzagged[dezzig_off + (t / 8) * 64 + (t % 8) * 8], 1);
+	}
+
+	block.sync();
+	for (int pass = 0; pass < 2; pass++) {
+		int t = thread + pass * 32;
+		if (t / 8 < 6)
+			CUDAsubroutineInplaceIDCTvector(&sh_dezigzagged[dezzig_off + (t / 8) * 64 + t % 8], 8);
+	}
 
 	block.sync();
 
-	// Acquire a texture block cache slot
-	__shared__ int sh_tbslot;
-	if(block.thread_rank() == 0){
-		uint32_t slotIndex = firstAvailableTBSlotsIndex + grid.block_rank();
+	// Acquire a texture block cache slot (thread 0 of each warp)
+	if (thread == 0 && is_valid) {
+		uint32_t slotIndex = firstAvailableTBSlotsIndex + global_mcu_index;
 		uint32_t tbslot = TBSlots[slotIndex];
-		uint32_t visFlag = 0b0000'0001; // mark as visible & newly cached. 
+		uint32_t visFlag = 0b0000'0001; // mark as visible & newly cached.
 		uint32_t value = (visFlag << 24) | tbslot;
 		uint64_t entry = (uint64_t(textureInfo) << 32) | uint64_t(value);
-		
+
 		bool alreadyExists = false;
 		int location = 0;
 		decodedMcuMap.set(textureInfo, 0, &location, &alreadyExists);
 		atomicExch(&decodedMcuMap.entries[location], entry);
 
-		sh_tbslot = tbslot;
+		sh_tbslot[mcu_in_block] = tbslot;
 	}
 
 	block.sync();
 
-	// Write decoded texels to texture block cache
-	for (int i = 0; i < 4; i++) {
-		uint8_t* rgba = (uint8_t*)&decoded[sh_tbslot * 256 + threadIdx.x + 64 * i];
-		float y = sh_dezigzagged[threadIdx.x + 64 * i] + 128.0f;
+	// Write decoded texels. 2 passes × 4 blocks = 256 texels per MCU.
+	if (is_valid) {
+		for (int pass = 0; pass < 2; pass++) {
+			int t = thread + pass * 32;
+			for (int i = 0; i < 4; i++) {
+				uint8_t* rgba = (uint8_t*)&decoded[sh_tbslot[mcu_in_block] * 256 + t + 64 * i];
+				float y = sh_dezigzagged[dezzig_off + t + 64 * i] + 128.0f;
 
-		int chroma_x = (thread % 8) / 2;
-		int chroma_y = (thread / 8) / 2;
-		int chroma_index = chroma_y * 8 + chroma_x + i / 2 * 4 * 8 + i % 2 * 4;
+				int chroma_x = (t % 8) / 2;
+				int chroma_y = (t / 8) / 2;
+				int chroma_index = chroma_y * 8 + chroma_x + i / 2 * 4 * 8 + i % 2 * 4;
 
-		float cb = sh_dezigzagged[chroma_index + 64 * 4];
-		float cr = sh_dezigzagged[chroma_index + 64 * 5];
+				float cb = sh_dezigzagged[dezzig_off + chroma_index + 64 * 4];
+				float cr = sh_dezigzagged[dezzig_off + chroma_index + 64 * 5];
 
-		rgba[0] = clamp(y + 1.402f * cr, 0.0f, 255.0f);
-		rgba[1] = clamp(y - 0.344136f * cb - 0.714136f * cr, 0.0f, 255.0f);
-		rgba[2] = clamp(y + 1.772f * cb, 0.0f, 255.0f);
-		rgba[3] = 255;
+				rgba[0] = clamp(y + 1.402f * cr, 0.0f, 255.0f);
+				rgba[1] = clamp(y - 0.344136f * cb - 0.714136f * cr, 0.0f, 255.0f);
+				rgba[2] = clamp(y + 1.772f * cb, 0.0f, 255.0f);
+				rgba[3] = 255;
+			}
+		}
 	}
 }
 
@@ -670,11 +698,13 @@ void kernel_launch_decode(
 
 	if(grid.thread_rank() == 0){
 
-		int numBlocks = *toDecodeCounter;
+		uint32_t numToDecode = *toDecodeCounter;
+		uint32_t numBlocks = (numToDecode + 1) / 2;  // 2 MCUs per block
 		uint32_t firstAvailableTBSlotsIndex = *TBSlotsCounter;
 
 		kernel_decode_420<<<numBlocks, 64>>>(
 			toDecode,
+			numToDecode,
 			decoded,
 			texturesData,
 			decodedMcuMap,
