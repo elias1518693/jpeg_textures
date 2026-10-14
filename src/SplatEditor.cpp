@@ -303,71 +303,89 @@ void SplatEditor::postFrame(){
 }
 
 void SplatEditor::overhead(){
-	double duTotals[6] = {0.0};
-		double totalMCUs = 0.0;
+
+	// Storing the first DC of each component as DC_BITS raw bits, plus the MCU
+	// index, is what random access into the JPEG costs us.
+
+	double duTotals[jpegindex::MAX_DATA_UNITS] = {0.0};
+	double totalMCUs = 0.0;
+	int texelsPerMCU = 0;
+	vector<JpegTexture::DataUnit> layout;
 
 	println("==================================");
 
 	int numTextures = 0;
 	int64_t numTexels = 0;
-	for(int i = 0; i < textureIndexer.size(); i++){
-		auto& indexer = textureIndexer[i];
+	for(int i = 0; i < jpegTextures.size(); i++){
+		auto& jpeg = jpegTextures[i];
 
-		if(indexer.mipMapLevel != 0) continue;
+		if(jpeg.mipMapLevel != 0) continue;
+		if(!jpeg.ok()) continue;
 
-		println("sizeof(indexer): {}", sizeof(indexer));
+		layout = jpeg.dataUnits;
+		texelsPerMCU = jpeg.mcuWidth * jpeg.mcuHeight;
 
-		println("# Texture {}, {} x {}", i / 8, indexer.width, indexer.height);
+		println("# Texture {}, {} x {}, {}, {} MCUs of {} x {} texels",
+			i / 8, jpeg.width, jpeg.height, jpeg.samplingName(),
+			jpeg.numMcus, jpeg.mcuWidth, jpeg.mcuHeight);
 
-		double avg_0 = double(indexer.bitsPerDUsDC[0]) / double(indexer.DUsDCCounter[0]);
-		double avg_1 = double(indexer.bitsPerDUsDC[1]) / double(indexer.DUsDCCounter[1]);
-		double avg_2 = double(indexer.bitsPerDUsDC[2]) / double(indexer.DUsDCCounter[2]);
-		double avg_3 = double(indexer.bitsPerDUsDC[3]) / double(indexer.DUsDCCounter[3]);
-		double avg_4 = double(indexer.bitsPerDUsDC[4]) / double(indexer.DUsDCCounter[4]);
-		double avg_5 = double(indexer.bitsPerDUsDC[5]) / double(indexer.DUsDCCounter[5]);
-		
 		println("    DC/DU data");
-		println("    bitsPerDUsDC[0]: {:8}; mcus: {:8}; avg: {:4.1f} bit per DU's DC; overhead: {:4.1f} bit per DC", indexer.bitsPerDUsDC[0], indexer.DUsDCCounter[0], avg_0, 12.0 - avg_0);
-		println("    bitsPerDUsDC[1]: {:8}; mcus: {:8}; avg: {:4.1f} bit per DU's DC; overhead: none",               indexer.bitsPerDUsDC[1], indexer.DUsDCCounter[1], avg_1);
-		println("    bitsPerDUsDC[2]: {:8}; mcus: {:8}; avg: {:4.1f} bit per DU's DC; overhead: none",               indexer.bitsPerDUsDC[2], indexer.DUsDCCounter[2], avg_2);
-		println("    bitsPerDUsDC[3]: {:8}; mcus: {:8}; avg: {:4.1f} bit per DU's DC; overhead: none",               indexer.bitsPerDUsDC[3], indexer.DUsDCCounter[3], avg_3);
-		println("    bitsPerDUsDC[4]: {:8}; mcus: {:8}; avg: {:4.1f} bit per DU's DC; overhead: {:4.1f} bit per DC", indexer.bitsPerDUsDC[4], indexer.DUsDCCounter[4], avg_4, 12.0 - avg_4);
-		println("    bitsPerDUsDC[5]: {:8}; mcus: {:8}; avg: {:4.1f} bit per DU's DC; overhead: {:4.1f} bit per DC", indexer.bitsPerDUsDC[5], indexer.DUsDCCounter[5], avg_5, 12.0 - avg_5);
+		for(int du = 0; du < jpeg.dataUnitsPerMcu; du++){
+			double average = double(jpeg.dcBitsPerDataUnit[du]) / double(jpeg.dcCountPerDataUnit[du]);
 
-		duTotals[0] += indexer.bitsPerDUsDC[0];
-		duTotals[1] += indexer.bitsPerDUsDC[1];
-		duTotals[2] += indexer.bitsPerDUsDC[2];
-		duTotals[3] += indexer.bitsPerDUsDC[3];
-		duTotals[4] += indexer.bitsPerDUsDC[4];
-		duTotals[5] += indexer.bitsPerDUsDC[5];
+			if(jpeg.dataUnits[du].absoluteDC){
+				println("    DU[{}] (component {}): {:8}; mcus: {:8}; avg: {:4.1f} bit per DU's DC; overhead: {:4.1f} bit per DC",
+					du, jpeg.dataUnits[du].component, jpeg.dcBitsPerDataUnit[du], jpeg.dcCountPerDataUnit[du],
+					average, double(jpegindex::DC_BITS) - average);
+			}else{
+				println("    DU[{}] (component {}): {:8}; mcus: {:8}; avg: {:4.1f} bit per DU's DC; overhead: none",
+					du, jpeg.dataUnits[du].component, jpeg.dcBitsPerDataUnit[du], jpeg.dcCountPerDataUnit[du], average);
+			}
 
-		int numMCUs = (indexer.width * indexer.height) / 256.0;
-		totalMCUs += (indexer.width * indexer.height) / 256.0;
+			duTotals[du] += double(jpeg.dcBitsPerDataUnit[du]);
+		}
 
-		if(numMCUs != indexer.DUsDCCounter[0]){
-			println("WARN: numMCUs != indexer.DUsDCCounter[0]");
+		totalMCUs += double(jpeg.numMcus);
+
+		if(jpeg.numMcus != jpeg.dcCountPerDataUnit[0]){
+			println("WARN: numMcus != jpeg.dcCountPerDataUnit[0]");
 		}
 		numTextures++;
-		numTexels += int64_t(indexer.width * indexer.height);
+		numTexels += int64_t(jpeg.width) * int64_t(jpeg.height);
+	}
+
+	if(numTextures == 0){
+		println("no textures to report on");
+		println("==================================");
+		return;
 	}
 
 	println("Number of textures: {}", numTextures);
 	println("Number of Texels: {} M", numTexels / 1'000'000ll);
 
+	// bits the DCs we store as absolute values took in the original JPEG
+	double originalDCBits = 0.0;
+	int numAbsoluteDCs = 0;
+
 	println("Average bit size over all MCUs: ");
-	println("    DU[0]: {:4.3f} bit -> {:4.3f} bit per MCU overhead", duTotals[0] / totalMCUs, 12.0 - (duTotals[0] / totalMCUs));
-	println("    DU[1]: {:4.3f} bit", duTotals[1] / totalMCUs);
-	println("    DU[2]: {:4.3f} bit", duTotals[2] / totalMCUs);
-	println("    DU[3]: {:4.3f} bit", duTotals[3] / totalMCUs);
-	println("    DU[4]: {:4.3f} bit -> {:4.3f} bit per MCU overhead", duTotals[4] / totalMCUs, 12.0 - (duTotals[4] / totalMCUs));
-	println("    DU[5]: {:4.3f} bit -> {:4.3f} bit per MCU overhead", duTotals[5] / totalMCUs, 12.0 - (duTotals[5] / totalMCUs));
+	for(int du = 0; du < layout.size(); du++){
+		double average = duTotals[du] / totalMCUs;
 
-	double origJPEG = (duTotals[0] + duTotals[4] + duTotals[5]) / totalMCUs;
-	double ours = 12.0 * 3.0;
-	double perTexelOverhead_DCs = (ours - origJPEG) / 256.0;
-	double perTexelOverhead_indexing = ((32.0 + 8.0 * 16.0) / 9.0f) / 256.0;
+		if(layout[du].absoluteDC){
+			println("    DU[{}]: {:4.3f} bit -> {:4.3f} bit per MCU overhead", du, average, double(jpegindex::DC_BITS) - average);
+			originalDCBits += average;
+			numAbsoluteDCs++;
+		}else{
+			println("    DU[{}]: {:4.3f} bit", du, average);
+		}
+	}
 
-	println("Overhead per Texel for DUs <0, 4, 5>      {:4.3f} bit", perTexelOverhead_DCs);
+	double ours = double(jpegindex::DC_BITS) * numAbsoluteDCs;
+	double perTexelOverhead_DCs = (ours - originalDCBits) / double(texelsPerMCU);
+	double indexBitsPerMCU = (32.0 + 16.0 * (jpegindex::MCU_INDEX_GROUP - 1)) / double(jpegindex::MCU_INDEX_GROUP);
+	double perTexelOverhead_indexing = indexBitsPerMCU / double(texelsPerMCU);
+
+	println("Overhead per Texel for absolute DCs       {:4.3f} bit", perTexelOverhead_DCs);
 	println("Overhead per Texel for indexing table     {:4.3f} bit", perTexelOverhead_indexing);
 	println("Overhead per Texel                        {:4.3f} bit", perTexelOverhead_DCs + perTexelOverhead_indexing);
 

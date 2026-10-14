@@ -52,64 +52,61 @@ void initJpegPipeline(){
 
 	int largestNumberOfHuffmanCodes = 0;
 
-	for (JPEGIndexer& indexer : editor->textureIndexer) {
+	for (JpegTexture& jpeg : editor->jpegTextures) {
+
+		if(!jpeg.ok()){
+			println("{}", jpeg.error);
+			exit(1);
+		}
+
 		TextureData textureData;
-		textureData.width = indexer.width;
-		textureData.height = indexer.height;
+		textureData.width = jpeg.width;
+		textureData.height = jpeg.height;
 
-		auto roundUp = [](int64_t value, int64_t n){
-			return ((value + n - 1ll) / n) * n;
-		};
-		//int64_t alignedSize = roundUp(indexer.only_ac_data.size(), 384);
-		textureData.data = CURuntime::alloc("textureData.data", indexer.only_ac_data.size() + 384);
-		cuMemcpyHtoDAsync(textureData.data, indexer.only_ac_data.data(), indexer.only_ac_data.size() * sizeof(uint8_t), 0);
+		// the decode kernel loads in chunks and may read past the last MCU
+		textureData.data = CURuntime::alloc("textureData.data", jpeg.mcuData.size() + 384);
+		cuMemcpyHtoDAsync(textureData.data, jpeg.mcuData.data(), jpeg.mcuData.size() * sizeof(uint8_t), 0);
 
-		textureData.mcuPositions = CURuntime::alloc("textureData.mcuPositions", indexer.mcu_index.size() * sizeof(uint32_t));
-		cuMemcpyHtoDAsync(textureData.mcuPositions, indexer.mcu_index.data(), indexer.mcu_index.size() * sizeof(uint32_t), 0);
+		textureData.mcuPositions = CURuntime::alloc("textureData.mcuPositions", jpeg.mcuIndex.size() * sizeof(uint32_t));
+		cuMemcpyHtoDAsync(textureData.mcuPositions, jpeg.mcuIndex.data(), jpeg.mcuIndex.size() * sizeof(uint32_t), 0);
 
-
+		// [DC of component 0 .. n-1, AC of component 0 .. n-1]
 		vector<HuffmanTable> huffman_table_vector;
-		for (const auto& class_entry : indexer.huffman_tables_components) {
-			for (const auto& table_entry : class_entry.second) {
-				HuffmanTable huff_table = {};
-				int temp_keys[256] = {};
-				int value_index = 0;
-				for (const auto& code_value : table_entry.second) {
-					const string& code = code_value.first;
-					int value = code_value.second;
+		for (const jpegindex::HuffmanSpec& spec : jpeg.huffmanTables) {
+			HuffmanTable huff_table = {};
 
-					int code_len = code.size();
-					huff_table.num_codes_per_bit_length[code_len - 1] += 1;
-					temp_keys[value_index] = std::stoi(code, nullptr, 2);
-					huff_table.huffman_values[value_index] = value;
-					value_index++;
+			int code = 0;
+			int valueIndex = 0;
+			for (int i = 0; i < 16; i++) {
+				int codeLength = i + 1;
+				int numCodes = spec.counts[i];
+				huff_table.num_codes_per_bit_length[i] = numCodes;
+
+				for (int j = 0; j < numCodes; j++) {
+					int value = spec.values[valueIndex];
+					huff_table.huffman_values[valueIndex] = value;
+					huff_table.packed[valueIndex] = (uint32_t(codeLength) << 16) | uint32_t(code);
+
+					code++;
+					valueIndex++;
 				}
 
-				largestNumberOfHuffmanCodes = max(largestNumberOfHuffmanCodes, int(table_entry.second.size()));
-				// println("Number of Huffman Codes: {}", table_entry.second.size());
-
-				// initialize list of code lengths for each huffman code.
-				int codeIndex = 0; 
-				for(int i = 0; i < 16; i++){
-					int codeLength = i + 1;
-					int numCodes = huff_table.num_codes_per_bit_length[i];
-					for(int j = 0; j < numCodes; j++){
-						huff_table.packed[codeIndex] = (uint32_t(codeLength) << 16) | uint32_t(temp_keys[codeIndex]);
-						codeIndex++;
-					}
-				}
-
-				huffman_table_vector.push_back(huff_table);
+				code <<= 1;
 			}
+
+			largestNumberOfHuffmanCodes = max(largestNumberOfHuffmanCodes, spec.numValues);
+
+			huffman_table_vector.push_back(huff_table);
 		}
 
 		textureData.huffmanTables = CURuntime::alloc("textureData.huffmanTables", huffman_table_vector.size() * sizeof(HuffmanTable));
 		cuMemcpyHtoDAsync(textureData.huffmanTables, huffman_table_vector.data(), huffman_table_vector.size() * sizeof(HuffmanTable), 0);
 
+		// one quantization table per component
 		vector<QuantizationTable> quant_table_vector;
-		for (const auto& quant_entry : indexer.quantization_tables) {
+		for (const jpegindex::QuantSpec& spec : jpeg.quantTables) {
 			QuantizationTable quant_table = {};
-			std::copy(quant_entry.second.begin(), quant_entry.second.end(), quant_table.values);
+			std::copy(std::begin(spec.values), std::end(spec.values), quant_table.values);
 			quant_table_vector.push_back(quant_table);
 		}
 		textureData.quanttables = CURuntime::alloc("textureData.quanttables", quant_table_vector.size() * sizeof(QuantizationTable));
@@ -312,7 +309,7 @@ void texturing_jpeg(vector<View> views, vector<shared_ptr<Framebuffer>> fbos){
 
 		uint32_t width = view.framebuffer->width;
 		uint32_t height = view.framebuffer->height;
-		int num_textures = editor->textureIndexer.size();
+		int num_textures = editor->jpegTextures.size();
 
 		// Figure out which MCUs need decoding
 		prog_jpeg->launch("kernel_mark", {
@@ -389,7 +386,7 @@ void texturing_jpeg(vector<View> views, vector<shared_ptr<Framebuffer>> fbos){
 
 		uint32_t width = view.framebuffer->width;
 		uint32_t height = view.framebuffer->height;
-		int num_textures = editor->textureIndexer.size();
+		int num_textures = editor->jpegTextures.size();
 		
 		// Launch threads in 1-dimensional arrangement
 		// prog_jpeg->launch("kernel_resolve", {

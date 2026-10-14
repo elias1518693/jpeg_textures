@@ -139,7 +139,7 @@ shared_ptr<SceneNode> loadModel(string file, int quality){
 		int textureWidth = 0;
 		int textureHeight = 0;
 		vector<uint8_t> decodedTexture;
-		vector<JPEGIndexer> indexerLevels;
+		vector<JpegTexture> jpegLevels;
 	};
 
 	vector<MeshPrepData> preppedMeshes;
@@ -278,12 +278,10 @@ shared_ptr<SceneNode> loadModel(string file, int quality){
 				stbi_image_free(imageData);
 			}
 
-			vector<JPEGIndexer> jpegLevels;
-			jpegLevels.push_back(JPEGIndexer(gltfTextureData));
+			vector<JpegTexture> jpegLevels;
+			jpegLevels.reserve(8);
+			jpegLevels.push_back(indexJpeg(gltfTextureData));
 
-			int height;
-			int n;
-			int width;
 			for (int i = 1; i < 8; i++) {
 				vector<uint8_t>test_jpeg;
 
@@ -293,9 +291,13 @@ shared_ptr<SceneNode> loadModel(string file, int quality){
 					resize_jpeg_buffer_turbo(gltfTextureData, textureWidth / pow(2,i), textureHeight / pow(2,i), test_jpeg, quality);
 				}
 
-				JPEGIndexer indexer = JPEGIndexer(test_jpeg);
-				indexer.mipMapLevel = i;
-				jpegLevels.push_back(indexer);
+				JpegTexture level = indexJpeg(test_jpeg);
+				level.mipMapLevel = i;
+				jpegLevels.push_back(std::move(level));
+			}
+
+			for (JpegTexture& level : jpegLevels) {
+				if (!level.ok()) println("mip level {}: {}", level.mipMapLevel, level.error);
 			}
 
 			string name = format("triangles: {}", positions.size() / 3);
@@ -308,7 +310,7 @@ shared_ptr<SceneNode> loadModel(string file, int quality){
 			preppedMesh.decodedTexture = decodedTexture;
 			preppedMesh.textureWidth = textureWidth;
 			preppedMesh.textureHeight = textureHeight;
-			preppedMesh.indexerLevels = jpegLevels;
+			preppedMesh.jpegLevels = std::move(jpegLevels);
 
 			lock_guard<mutex> lock(mtx);
 			println("loaded mesh[{}]", preppedMeshes.size());
@@ -347,8 +349,8 @@ shared_ptr<SceneNode> loadModel(string file, int quality){
 		node->texture->width = textureWidth;
 		node->texture->height = textureHeight;
 
-		for(int i = 0; i < prepped.indexerLevels.size(); i++){
-			editor->textureIndexer.push_back(prepped.indexerLevels[i]);
+		for(int i = 0; i < prepped.jpegLevels.size(); i++){
+			editor->jpegTextures.push_back(std::move(prepped.jpegLevels[i]));
 		}
 
 		container->children.push_back(node);
@@ -392,12 +394,12 @@ void initScene() {
 		vector<uint8_t> datavu8 = vector<uint8_t>(data->data_u8, data->data_u8 + data->size);
 		
 		int numDuplicates = 10;
-		vector<JPEGIndexer> jpegs(8 * numDuplicates);
+		vector<JpegTexture> jpegs(8 * numDuplicates);
 		for(int texIdx = 0; texIdx < numDuplicates; texIdx++){
 			
 			// MIP MAPS FOR JPEG
-			// jpegs.push_back(JPEGIndexer(datavu8));
-			jpegs[8 * texIdx] = JPEGIndexer(datavu8);
+			// jpegs.push_back(indexJpeg(datavu8));
+			jpegs[8 * texIdx] = indexJpeg(datavu8);
 			int width = jpegs[8 * texIdx].width;
 			int height = jpegs[8 * texIdx].height;
 
@@ -410,16 +412,15 @@ void initScene() {
 					resize_jpeg_buffer_turbo(datavu8, width / pow(2,i), height / pow(2,i), test_jpeg);
 				}
 
-				JPEGIndexer indexer = JPEGIndexer(test_jpeg);
-				indexer.mipMapLevel = i;
-				// jpegs.push_back(indexer);
-				jpegs[8 * texIdx + i] = indexer;
+				JpegTexture level = indexJpeg(test_jpeg);
+				level.mipMapLevel = i;
+				jpegs[8 * texIdx + i] = std::move(level);
 			}
 
 		}
 
 		for(int i = 0; i < jpegs.size(); i++){
-			editor->textureIndexer.push_back(jpegs[i]);
+			editor->jpegTextures.push_back(std::move(jpegs[i]));
 		}
 	};
 

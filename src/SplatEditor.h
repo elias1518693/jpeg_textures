@@ -51,7 +51,7 @@ struct SplatEditor{
 	void* h_state_pinned = nullptr;
 	CUdeviceptr cptr_state;
 
-	vector<JPEGIndexer> textureIndexer;
+	vector<JpegTexture> jpegTextures;
 	CommonLaunchArgs launchArgs;
 
 	struct{

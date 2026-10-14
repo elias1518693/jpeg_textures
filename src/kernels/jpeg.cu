@@ -608,19 +608,23 @@ void kernel_decode_420(
 
 	block.sync();
 
-	float q1_lo = __ldg(&textureData.quanttables[0].values[thread]);
-	float q1_hi = __ldg(&textureData.quanttables[0].values[thread + 32]);
-	float q2_lo = __ldg(&textureData.quanttables[1].values[thread]);
-	float q2_hi = __ldg(&textureData.quanttables[1].values[thread + 32]);
+	// one quantization table per component: 0 = Y, 1 = Cb, 2 = Cr
+	float qy_lo  = __ldg(&textureData.quanttables[0].values[thread]);
+	float qy_hi  = __ldg(&textureData.quanttables[0].values[thread + 32]);
+	float qcb_lo = __ldg(&textureData.quanttables[1].values[thread]);
+	float qcb_hi = __ldg(&textureData.quanttables[1].values[thread + 32]);
+	float qcr_lo = __ldg(&textureData.quanttables[2].values[thread]);
+	float qcr_hi = __ldg(&textureData.quanttables[2].values[thread + 32]);
 
 	for (int i = 0; i < 4; i++) {
-		sh_dezigzagged[dezzig_off + dezigzag_order[thread]      + i * 64] = sh_coefficients[coeff_off + thread      + 64 * i] * q1_lo;
-		sh_dezigzagged[dezzig_off + dezigzag_order[thread + 32] + i * 64] = sh_coefficients[coeff_off + thread + 32 + 64 * i] * q1_hi;
+		sh_dezigzagged[dezzig_off + dezigzag_order[thread]      + i * 64] = sh_coefficients[coeff_off + thread      + 64 * i] * qy_lo;
+		sh_dezigzagged[dezzig_off + dezigzag_order[thread + 32] + i * 64] = sh_coefficients[coeff_off + thread + 32 + 64 * i] * qy_hi;
 	}
-	for (int i = 0; i < 2; i++) {
-		sh_dezigzagged[dezzig_off + dezigzag_order[thread]      + i * 64 + 256] = sh_coefficients[coeff_off + thread      + 256 + 64 * i] * q2_lo;
-		sh_dezigzagged[dezzig_off + dezigzag_order[thread + 32] + i * 64 + 256] = sh_coefficients[coeff_off + thread + 32 + 256 + 64 * i] * q2_hi;
-	}
+
+	sh_dezigzagged[dezzig_off + dezigzag_order[thread]      + 256] = sh_coefficients[coeff_off + thread      + 256] * qcb_lo;
+	sh_dezigzagged[dezzig_off + dezigzag_order[thread + 32] + 256] = sh_coefficients[coeff_off + thread + 32 + 256] * qcb_hi;
+	sh_dezigzagged[dezzig_off + dezigzag_order[thread]      + 320] = sh_coefficients[coeff_off + thread      + 320] * qcr_lo;
+	sh_dezigzagged[dezzig_off + dezigzag_order[thread + 32] + 320] = sh_coefficients[coeff_off + thread + 32 + 320] * qcr_hi;
 
 	block.sync();
 
